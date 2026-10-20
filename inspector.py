@@ -5,7 +5,8 @@ from xml.etree import ElementTree as ET
 import re
 import openpyxl
 from openpyxl.cell.cell import MergedCell
-from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.cell_range import CellRange
+from math import isfinite
 
 RULES = ['显示格式','数据有无','水平对齐','垂直对齐','换行与缩小','合并单元格','字体']
 COLORS = {'blue':'#b9dfff','green':'#bce8c9','red':'#ffc3c3','yellow':'#ffed9c','none':'#ffffff'}
@@ -29,8 +30,27 @@ def marks(c, font, size, merged=False):
     return colors, bool(f.b or not black)
 
 def inspect(data, name, font='ＭＳ Ｐゴシック', size=10):
+    if len(data)>30*1024*1024: raise ValueError('文件超过 30 MB')
+    if not font.strip() or not isfinite(size) or not 0<size<=409: raise ValueError('请输入有效字体和字号')
     with ZipFile(BytesIO(data)) as z:
         if sum(i.file_size for i in z.infolist())>150*1024*1024: raise ValueError('解压后超过 150 MB，请拆分文件')
+        # Check worksheet sizes before openpyxl constructs cell and merged-cell objects.
+        for part in z.namelist():
+            if re.match(r'xl/worksheets/sheet\d+\.xml$', part):
+                count=0; merged_count=0; merged_cells=0
+                with z.open(part) as source:
+                    for _, element in ET.iterparse(source, events=('end',)):
+                        if element.tag.rsplit('}',1)[-1]=='c':
+                            count+=1
+                            if count>250000: raise ValueError('工作表超过 250000 个已存储单元格，请拆分')
+                        if element.tag.rsplit('}',1)[-1]=='mergeCell':
+                            region=CellRange(element.attrib['ref'])
+                            merged_count+=1
+                            merged_cells+=region.size['rows']*region.size['columns']
+                            if merged_count>10000: raise ValueError('合并区域过多')
+                            if merged_cells>250000:
+                                raise ValueError('合并区域合计超过 250000 个单元格，请拆分')
+                        element.clear()
         shapes=[]
         for p in z.namelist():
             if re.match(r'xl/drawings/drawing\d+\.xml$',p):
@@ -56,14 +76,22 @@ def inspect(data, name, font='ＭＳ Ｐゴシック', size=10):
             r=next(iter(ws._print_area.ranges))
             outside='有り' if ws.max_row>r.max_row or ws.max_column>r.max_col else '無し'
         sheet={'name':ws.title,'rows':ws.max_row,'cols':ws.max_column,'print_area':area,'outside':outside,'state':ws.sheet_state,'merges':[str(r) for r in ranges],'cells':[]}
-        for c in ws._cells.values():
+        ordered_ranges=sorted(ranges,key=lambda r:r.min_row)
+        active=[]; range_index=0; current_row=None
+        for c in sorted(ws._cells.values(),key=lambda c:(c.row,c.column)):
             if isinstance(c,MergedCell): continue
             if c.value is None and not c.has_style: continue
-            merged=next((str(r) for r in ranges if c.coordinate in r),None)
+            if current_row!=c.row:
+                current_row=c.row
+                active=[r for r in active if r.max_row>=current_row]
+                while range_index<len(ordered_ranges) and ordered_ranges[range_index].min_row<=current_row:
+                    region=ordered_ranges[range_index]; range_index+=1
+                    if region.max_row>=current_row: active.append(region)
+            merged=next((str(r) for r in active if r.min_col<=c.column<=r.max_col),None)
             colors,pattern=marks(c,font,size,bool(merged))
             val='' if c.value is None else str(c.value)
             if re.search(r'@.*@',val): result['new_type']=True
-            sheet['cells'].append({'address':c.coordinate,'row':c.row,'col':c.column,'value':val,'colors':colors,'pattern':pattern,'merge':merged,'format':c.number_format,'font':c.font.name,'size':c.font.sz,'bold':bool(c.font.b),'font_color':color_info(c.font.color),'horizontal':c.alignment.horizontal or 'general','vertical':c.alignment.vertical or 'bottom','wrap':bool(c.alignment.wrap_text),'shrink':bool(c.alignment.shrink_to_fit),'formula':c.data_type=='f'})
+            sheet['cells'].append({'address':c.coordinate,'row':c.row,'col':c.column,'value':val,'colors':colors,'pattern':pattern,'merge':merged,'format':c.number_format,'font':c.font.name,'size':c.font.sz,'bold':bool(c.font.b),'font_color':color_info(c.font.color),'horizontal':c.alignment.horizontal or 'general','vertical':c.alignment.vertical or 'bottom','wrap':bool(c.alignment.wrap_text),'shrink':bool(c.alignment.shrink_to_fit),'formula':c.data_type=='f','data_type':c.data_type,'italic':bool(c.font.i),'underline':c.font.u,'strike':bool(c.font.strike),'rotation':c.alignment.textRotation,'indent':c.alignment.indent})
         result['sheets'].append(sheet)
     wb.close()
     return result
