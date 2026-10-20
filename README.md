@@ -6,6 +6,8 @@
 
 安装 Python 3.10 或更新版本，解压后双击 `start.bat`。首次运行需要联网安装 openpyxl，随后会打开 http://127.0.0.1:8765 。命令行窗口需保持打开；关闭窗口或 Ctrl+C 停止服务。
 
+使用 Git Bash（或 macOS / Linux 终端）时，可改为运行 `./start.sh`，例如 `./start.sh --port 9000`。
+
 也可手动运行：
 
 ```bash
